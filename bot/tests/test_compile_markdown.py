@@ -338,6 +338,30 @@ async def test_markdown_routing_uses_content_and_checks_foreign_decisions(pipeli
         await Shuffle(pipeline).run(node, docs)
 
 
+@pytest.mark.parametrize(
+    ("budget", "expected"),
+    [(1_000, [["a", "b", "c"]]), (40, [["a", "b"], ["c"]]), (5, [["a"], ["b"], ["c"]])],
+)
+async def test_all_routing_splits_drafts_within_input_budget(pipeline, budget, expected):
+    pipeline.contract = Contract.model_validate(
+        {
+            "extract": {"instructions": "Write source facts as Markdown."},
+            "routing": {"mode": "all"},
+            "reduce": {"instructions": "Write one report from every draft."},
+        }
+    )
+    pipeline.limits = CompileLimits(merge_input_chars=budget)
+    docs = [Document(f"{name}.md", f"drafts/{name}.md") for name in "abc"]
+    for doc in docs:
+        await pipeline.files.sandbox.write_file(doc.workspace_path, "# Day\n\nOne fact.")
+    pipeline.model.provider.chat = AsyncMock(side_effect=AssertionError("no routing model"))
+    node = parse_plan(MERGE, pipeline.contract)[1]
+    groups = await Shuffle(pipeline).run(node, docs)
+    assert [[doc.path[0] for doc in group.documents] for group in groups] == expected
+    assert len({group.group_id for group in groups}) == len(groups)
+    assert bool(pipeline.warnings) == (len(expected) > 1)
+
+
 async def test_finalization_requires_unique_paths_and_prior_target_read(pipeline):
     doc = Document("topic.md", "draft.md")
     await pipeline.files.sandbox.write_file(doc.workspace_path, "# Topic\n\nNew facts.")

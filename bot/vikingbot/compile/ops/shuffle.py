@@ -151,6 +151,24 @@ def group_related_documents(keys, links):
     return groups
 
 
+def bounded_batches(sizes, budget):
+    """Split indices, in input order, into consecutive batches within a size budget.
+
+    A batch closes before an item would exceed the budget; an item larger than the
+    budget forms its own batch rather than being truncated.
+    """
+    batches, current, used = [], [], 0
+    for index, size in enumerate(sizes):
+        if current and used + size > budget:
+            batches.append(current)
+            current, used = [], 0
+        current.append(index)
+        used += size
+    if current:
+        batches.append(current)
+    return batches
+
+
 class Shuffle:
     """Select draft groups by Markdown content; recalled history remains within the target."""
 
@@ -319,7 +337,21 @@ class Shuffle:
         )
         by_id = {doc.workspace_path: doc for doc in documents}
         if rule.mode == "all":
-            return [Group("all", documents, sorted({h["uri"] for hits in histories for h in hits}))]
+            history = sorted({h["uri"] for hits in histories for h in hits})
+            budget = r.limits.merge_input_chars
+            batches = bounded_batches([len(body) for body in bodies], budget)
+            if len(batches) == 1:
+                return [Group("all", documents, history)]
+            # One Reduce worker cannot hold every draft; same-path outputs of the
+            # batches are combined by file collision resolution before publication.
+            r.warnings.append(
+                f"Routing 'all' split {len(documents)} drafts into {len(batches)} groups "
+                f"of at most {budget} characters; outputs sharing a path are merged afterwards."
+            )
+            return [
+                Group(f"all-{number}", [documents[i] for i in batch], history)
+                for number, batch in enumerate(batches, 1)
+            ]
         stop = Event()
         try:
             try:
